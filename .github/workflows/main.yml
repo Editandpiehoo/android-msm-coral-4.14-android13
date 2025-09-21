@@ -44,9 +44,13 @@ jobs:
         run: |
           echo "=== PATCHING GCC-WRAPPER FOR PYTHON 3 ==="
           if [ -f "scripts/gcc-wrapper.py" ]; then
-            sed -i 's/print >> sys.stderr/print(file=sys.stderr)/g' scripts/gcc-wrapper.py
+            sed -i 's/line.rstrip('\''\n'\''/line.rstrip(b'\''\n'\'').decode('\''utf-8'\''/g' scripts/gcc-wrapper.py
+            sed -i 's/print line,/print(line, end='\'''\''/g' scripts/gcc-wrapper.py
+            sed -i 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/g' scripts/gcc-wrapper.py
+            sed -i 's/print args[0] + '\'':'\'',e.strerror/print(args[0] + '\'':'\'', e.strerror)/g' scripts/gcc-wrapper.py
+            sed -i 's/print '\'' '\''.join(args), str(e)/print('\'' '\''.join(args), str(e))/g' scripts/gcc-wrapper.py
             echo "✓ Patch applied"
-            grep "print" scripts/gcc-wrapper.py | head -5
+            cat scripts/gcc-wrapper.py
           else
             echo "⚠️ gcc-wrapper.py not found - skipping patch"
           fi
