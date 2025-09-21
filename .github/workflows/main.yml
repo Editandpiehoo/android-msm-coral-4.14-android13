@@ -1,0 +1,74 @@
+name: Build KernelSU-Next + SUSFS for Pixel 4XL
+
+on:
+  workflow_dispatch:  # Запуск вручную через Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Полный гит-история для патчей
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools xsltproc zip zlib1g-dev gcc-multilib g++-multilib libelf-dev python3 python3-pip
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Download Android toolchain
+        run: |
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+          export PATH=$PATH:$(pwd)/aarch64-linux-android-4.9/bin
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+      - name: Integrate KernelSU-Next v1.1.0
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v1.1.0/kernel/setup.sh" | bash -s v1.1.0
+          # Если нужно manual integration (если kprobe не сработает), добавь патчи вручную здесь
+
+      - name: Integrate SUSFS patches
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          cd susfs4ksu
+          git checkout kernel-4.14  # Ветка для 4.14
+          cd ..
+          # Примени патчи (замени на реальные файлы из repo; проверь в susfs4ksu/tree/kernel-4.14)
+          git apply susfs4ksu/0001-susfs-base.patch  # Пример; добавь все .patch файлы
+          git apply susfs4ksu/0002-susfs-ksu-compat.patch  # Для совместимости с KSU
+          # Если revert нужен для KSU commit: git revert <commit-hash> (из SUSFS docs)
+
+      - name: Prepare config
+        run: |
+          make O=out coral_defconfig
+          # Включи KSU и SUSFS в config (если не автоматически)
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config
+          # Добавь KPROBES если нужно
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config
+
+      - name: Build kernel
+        run: |
+          make O=out -j$(nproc --all) Image.gz-dtb
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          cd AnyKernel3
+          # Настрой anykernel.sh (добавь твои props)
+          sed -i 's/device.name1=/device.name1=coral/' anykernel.sh
+          sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0 + SUSFS/' anykernel.sh
+          zip -r ../AnyKernel3-KSU-SUSFS.zip *
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-zip
+          path: AnyKernel3-KSU-SUSFS.zip
