@@ -1,7 +1,7 @@
 name: Build KernelSU-Next + SUSFS for Pixel 4XL
 
 on:
-  workflow_dispatch:  # Запуск вручную через Actions tab
+  workflow_dispatch:  # Убеждаемся, что кнопка "Run workflow" доступна
 
 jobs:
   build:
@@ -10,8 +10,8 @@ jobs:
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Полный гит-история для патчей
-          submodules: false  # Отключаем автоматическое обновление submodules
+          fetch-depth: 0
+          submodules: false
 
       - name: Install dependencies
         run: |
@@ -30,12 +30,9 @@ jobs:
 
       - name: Clean and prepare kernel source
         run: |
-          # Удаляем старую интеграцию KSU
           rm -rf KernelSU
-          # Удаляем submodule ссылки
           rm -f .gitmodules
           git config --unset-all submodule.KernelSU.url || true
-          # Возвращаем проблемный файл к оригинальному состоянию
           git checkout -- fs/notify/fdinfo.c || true
           echo "=== Git status after cleanup ==="
           git status --short
@@ -46,101 +43,58 @@ jobs:
           echo "=== Git status after KSU integration ==="
           git status --short
 
-      - name: Integrate SUSFS patches with SIMPLE manual fix
+      - name: Integrate SUSFS patches with simple manual fix
         run: |
           git clone https://gitlab.com/simonpunk/susfs4ksu.git
           cd susfs4ksu
           git checkout kernel-4.14
           cd ..
           
-          # Очищаем trailing whitespace из патча
           sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > cleaned_susfs.patch
-          
-          # Применяем патч с reject файлами
           git apply --reject --ignore-whitespace cleaned_susfs.patch
           
-          # ПРОСТАЯ РУЧНАЯ ПРАВКА - используем sed для добавления SUSFS после inotify секции
           echo "=== APPLYING SIMPLE SUSFS FIX TO fdinfo.c ==="
-          
-          # Показываем текущий файл для диагностики
-          echo "=== BEFORE FIX - inotify section in fdinfo.c ==="
-          grep -A10 -B5 "inotify.*mark.*mask" fs/notify/fdinfo.c || echo "No inotify section found"
-          
-          # Ищем конец inotify секции (после inotify_mark_user_mask) и добавляем SUSFS
-          if grep -q "inotify_mark_user_mask.*mark" fs/notify/fdinfo.c; then
-            echo "✓ Found inotify section, adding SUSFS integration..."
-            
-            # Добавляем SUSFS код после строки с inotify_mark_user_mask
-            sed -i '/inotify_mark_user_mask.*mark.*);/a\
-			} else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-				struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-				seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-					   susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-					   susfs_mark->mask);\
-			}' fs/notify/fdinfo.c
-            
-            echo "✓ Simple SUSFS fix applied with sed"
+          if grep -q "inotify_mark_user_mask(mark)" fs/notify/fdinfo.c; then
+            sed -i '/inotify_mark_user_mask(mark));/a\
+              } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
+                struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
+                seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
+                           susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
+                           susfs_mark->mask);\
+              }' fs/notify/fdinfo.c
+            echo "✓ SUSFS fix applied after inotify section"
           else
-            echo "✗ Could not find inotify reference - trying alternative approach"
-            # Альтернативный подход - ищем любую строку с seq_printf и inotify
-            if grep -q 'seq_printf.*"inotify' fs/notify/fdinfo.c; then
-              sed -i '/seq_printf.*"inotify/a\
-			} else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-				struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-				seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-					   susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-					   susfs_mark->mask);\
-			}' fs/notify/fdinfo.c
-              echo "✓ Alternative SUSFS fix applied"
-            else
-              echo "✗ Could not find any inotify reference - showing file structure:"
-              grep -n "seq_printf\|inotify" fs/notify/fdinfo.c || echo "No seq_printf or inotify found"
-              # В крайнем случае добавляем SUSFS в конец функции show_fdinfo
-              sed -i '/^}/i\
-			if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-				struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-				seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-					   susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-					   susfs_mark->mask);\
-			}' fs/notify/fdinfo.c
-              echo "✓ Last resort SUSFS fix applied at end of function"
-            fi
+            echo "✗ Could not find inotify reference - using fallback"
+            sed -i '/seq_printf.*"inotify"/a\
+              } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
+                struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
+                seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
+                           susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
+                           susfs_mark->mask);\
+              }' fs/notify/fdinfo.c
+            echo "✓ Fallback SUSFS fix applied"
           fi
           
-          # Удаляем временные файлы
           rm -f fs/notify/fdinfo.c.rej cleaned_susfs.patch
-          
-          # Финальная проверка
           echo "=== VERIFICATION: SUSFS INTEGRATION CHECK ==="
-          if grep -q "susfs.*wd:%x" fs/notify/fdinfo.c; then
-            echo "✓ SUCCESS: SUSFS code successfully integrated"
-            echo "=== RELEVANT LINES FROM fdinfo.c ==="
-            sed -n '/susfs wd:/,/}/p' fs/notify/fdinfo.c
+          if grep -q "susfs wd:%x" fs/notify/fdinfo.c; then
+            echo "✓ SUSFS code successfully integrated"
           else
-            echo "✗ WARNING: SUSFS code NOT found in final file"
-            echo "=== FINAL FILE CHECK - searching for SUSFS ==="
-            grep -n "susfs\|FSNOTIFY_MARK_TYPE_SUSFS" fs/notify/fdinfo.c || echo "No SUSFS code found"
-            echo "=== FINAL FILE CHECK - inotify section ==="
-            grep -A5 -B2 "inotify.*mark" fs/notify/fdinfo.c || echo "No inotify section found"
-            # НЕ ПАДАЕМ - продолжаем сборку даже без идеальной SUSFS интеграции
-            echo "⚠️  Continuing build without perfect SUSFS fdinfo integration"
+            echo "⚠️ SUSFS code not found - continuing build"
           fi
 
       - name: Prepare config
         run: |
           make O=out coral_defconfig
-          # Включаем KSU и SUSFS
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' out/.config || true
-          
           echo "=== KERNEL CONFIG VERIFICATION ==="
           grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES|CONFIG_KPROBE_EVENTS)" out/.config || echo "Some config options may be missing"
 
       - name: Build kernel
         run: |
-          echo "=== STARTING KERNEL BUILD ==="
           make O=out -j$(nproc --all) Image.gz-dtb || {
             echo "=== BUILD FAILED - SHOWING LAST 20 LINES ==="
             tail -20 /tmp/build.log || echo "No build log found"
@@ -148,15 +102,12 @@ jobs:
           }
           echo "=== KERNEL BUILD SUCCESSFUL ==="
           ls -la out/arch/arm64/boot/
-          echo "Kernel Image size: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
 
       - name: Package with AnyKernel3
         run: |
-          echo "=== PACKAGING WITH ANYKERNEL3 ==="
           git clone https://github.com/osm0sis/AnyKernel3
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
           cd AnyKernel3
-          # Настройка для Pixel 4XL (coral)
           sed -i 's/#device.name1=/device.name1=coral/' anykernel.sh
           sed -i 's/#isize=/isize=3072/' anykernel.sh
           sed -i 's/#device.name2=/device.name2=coral/' anykernel.sh
@@ -165,7 +116,6 @@ jobs:
           sed -i 's/#do.cleanup=1/do.cleanup=1/' anykernel.sh
           sed -i 's/#do.cleanuponabort=0/do.cleanuponabort=0/' anykernel.sh
           sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0 + SUSFS for Pixel 4XL/' anykernel.sh
-          # Создаём финальный ZIP
           zip -r4 ../AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip * -x .git README.md
           cd ..
           echo "=== PACKAGING COMPLETE ==="
@@ -182,19 +132,15 @@ jobs:
         run: |
           echo "=== BUILD SUMMARY ==="
           echo "✓ KernelSU-Next v1.1.0: Integrated"
-          echo "⚠️  SUSFS: Integrated with manual fixes (check logs for details)"
+          echo "⚠️ SUSFS: Integrated with manual fixes (check logs)"
           echo "✓ Kernel built: $(ls -la out/arch/arm64/boot/Image.gz-dtb)"
           echo "✓ Package created: $(ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip)"
           echo ""
           echo "=== INSTALLATION INSTRUCTIONS ==="
           echo "1. Download ZIP artifact from this workflow run"
           echo "2. Boot Pixel 4XL to fastboot: adb reboot bootloader"
-          echo "3. Extract boot.img from ZIP: unzip -p AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip boot.img > boot.img"
+          echo "3. Extract boot.img: unzip -p AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip boot.img > boot.img"
           echo "4. Flash: fastboot flash boot boot.img"
           echo "5. Reboot: fastboot reboot"
           echo "6. Install KernelSU Manager app from GitHub releases"
-          echo "7. Open app - should show KernelSU v1.1.0"
-          echo ""
-          echo "=== TROUBLESHOOTING ==="
-          echo "If KernelSU doesn't show v1.1.0, reflash stock boot.img and try again"
-          echo "SUSFS modules should work with KernelSU Manager modules section"
+          echo "7. Verify KernelSU v1.1.0 in the app"
