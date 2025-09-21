@@ -65,6 +65,10 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v1.1.0/kernel/setup.sh" | bash -s v1.1.0
           echo "=== Git status after KSU integration ==="
           git status --short
+          
+          # Коммитим изменения, чтобы убрать -dirty
+          git add .
+          git commit -m "Integrate KernelSU-Next v1.1.0" || true
 
       - name: Integrate SUSFS patches
         run: |
@@ -90,6 +94,10 @@ jobs:
           rm -f cleaned.patch
           echo "=== SUSFS INTEGRATION COMPLETE ==="
           git status --short
+          
+          # Коммитим изменения, чтобы убрать -dirty
+          git add .
+          git commit -m "Integrate SUSFS" || true
 
       - name: Prepare config
         run: |
@@ -110,7 +118,7 @@ jobs:
           # Применяем defconfig
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- $DEFCONFIG || {
             echo "❌ sm8150_defconfig failed, trying fallback configs..."
-            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- coral_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux- flame_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig || exit 1
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- coral_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- flame_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig || exit 1
           }
           
           # Разрешаем все prompts
@@ -125,7 +133,7 @@ jobs:
           
           # Сокращаем LOCALVERSION, чтобы избежать ошибки с длиной UTS_RELEASE
           echo "=== SHORTENING LOCALVERSION ==="
-          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-KSU-SUSFS"/' out/.config || echo 'CONFIG_LOCALVERSION="-KSU-SUSFS"' >> out/.config
+          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-KSU"/' out/.config || echo 'CONFIG_LOCALVERSION="-KSU"' >> out/.config
           
           # Повторно разрешаем prompts после изменений
           yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- oldconfig
