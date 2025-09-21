@@ -42,7 +42,7 @@ jobs:
 
       - name: Patch gcc-wrapper for Python 3
         run: |
-          echo "=== PATCHING GCC-WRAPPER FOR PYTHON 3 COMPATIBILITY ==="
+          echo "=== PATCHING GCC-WRAPPER FOR PYTHON 3 ==="
           if [ -f "scripts/gcc-wrapper.py" ]; then
             sed -i 's/print >> sys.stderr/print(file=sys.stderr)/g' scripts/gcc-wrapper.py
             echo "✓ Patch applied"
@@ -110,7 +110,7 @@ jobs:
           # Применяем defconfig
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- $DEFCONFIG || {
             echo "❌ sm8150_defconfig failed, trying fallback configs..."
-            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- coral_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- flame_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig || exit 1
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- coral_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux- flame_defconfig || make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig || exit 1
           }
           
           # Разрешаем все prompts
@@ -123,11 +123,19 @@ jobs:
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' out/.config || true
           
+          # Сокращаем LOCALVERSION, чтобы избежать ошибки с длиной UTS_RELEASE
+          echo "=== SHORTENING LOCALVERSION ==="
+          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-KSU-SUSFS"/' out/.config || echo 'CONFIG_LOCALVERSION="-KSU-SUSFS"' >> out/.config
+          
           # Повторно разрешаем prompts после изменений
           yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- oldconfig
           
+          # Финальная silentoldconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- silentoldconfig
+          
           echo "=== CONFIG VERIFICATION ==="
           grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES)" out/.config || echo "⚠️ Some options missing"
+          grep CONFIG_LOCALVERSION out/.config
 
       - name: Build kernel
         run: |
@@ -137,7 +145,7 @@ jobs:
           echo "PATH: $PATH"
           which aarch64-linux-android-gcc || echo "❌ GCC missing"
           
-          # Компилируем
+          # Компилируем ядро
           yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- -j$(nproc --all) Image.gz-dtb || exit 1
           
           echo "=== BUILD SUCCESSFUL ==="
