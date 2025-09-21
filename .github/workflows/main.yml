@@ -19,25 +19,23 @@ jobs:
           sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools xsltproc zip zlib1g-dev gcc-multilib g++-multilib libelf-dev python3 python3-pip
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Setup toolchain and environment
+      - name: Setup toolchain
         run: |
           # Скачиваем toolchain
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
           
-          # Добавляем toolchain в PATH
-          echo "$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
+          # Проверяем содержимое toolchain
+          echo "=== TOOLCHAIN CONTENTS ==="
+          ls -la aarch64-linux-android-4.9/bin/ | head -10
           
-          # Устанавливаем переменные окружения для всех шагов
-          echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          
-          # Проверяем toolchain
-          echo "=== TOOLCHAIN VERIFICATION ==="
-          ls -la aarch64-linux-android-4.9/bin/ | head -5
-          which aarch64-linux-android-gcc || echo "GCC not found"
-          aarch64-linux-android-gcc --version | head -1 || echo "GCC version check failed"
+          # Проверяем, что gcc существует
+          if [ -f "aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc" ]; then
+            echo "✓ GCC found: $(pwd)/aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc"
+            aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc --version | head -1
+          else
+            echo "❌ GCC NOT FOUND in toolchain"
+            exit 1
+          fi
 
       - name: Clean and prepare kernel source
         run: |
@@ -48,9 +46,9 @@ jobs:
           echo "=== Git status after cleanup ==="
           git status --short
           
-          # Показываем доступные defconfig'и для Pixel 4XL
+          # Показываем доступные defconfig'и
           echo "=== AVAILABLE DEFCONFIGs ==="
-          find arch/arm64/configs/ -name "*coral*" -o -name "*flame*" | head -10 || echo "No coral/flame defconfigs found"
+          find arch/arm64/configs/ -name "*coral*" -o -name "*flame*" -o -name "*defconfig" | head -10 || echo "No defconfigs found"
 
       - name: Integrate KernelSU-Next v1.1.0
         run: |
@@ -78,9 +76,6 @@ jobs:
           fi
           
           echo "=== APPLYING MANUAL SUSFS FIX TO fdinfo.c ==="
-          echo "=== BEFORE FIX - searching for inotify section ==="
-          grep -n -A5 -B3 "inotify.*mark.*mask" fs/notify/fdinfo.c || echo "No inotify section found with grep"
-          
           FIXED=false
           
           if grep -q "inotify_mark_user_mask(mark));" fs/notify/fdinfo.c; then
@@ -91,7 +86,7 @@ jobs:
                          susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
                          susfs_mark->mask);\
             }' fs/notify/fdinfo.c
-            echo "✓ LEVEL 1: SUSFS fix applied after exact inotify_mark_user_mask match"
+            echo "✓ LEVEL 1: SUSFS fix applied"
             FIXED=true
           fi
           
@@ -103,32 +98,7 @@ jobs:
                          susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
                          susfs_mark->mask);\
             }' fs/notify/fdinfo.c
-            echo "✓ LEVEL 2: SUSFS fix applied after inotify_mark_user_mask match"
-            FIXED=true
-          fi
-          
-          if [ "$FIXED" = false ] && grep -q 'seq_printf.*"inotify wd:' fs/notify/fdinfo.c; then
-            sed -i '/seq_printf.*"inotify wd:/,/inotify_mark_user_mask/a\
-            } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-              struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-              seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-                         susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-                         susfs_mark->mask);\
-            }' fs/notify/fdinfo.c
-            echo "✓ LEVEL 3: SUSFS fix applied after inotify wd: section"
-            FIXED=true
-          fi
-          
-          if [ "$FIXED" = false ]; then
-            sed -i '/static int show_fdinfo/{N;a\
-            if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-              struct susfs_mark *susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-              seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-                         susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-                         susfs_mark->mask);\
-            }\
-            ' -i fs/notify/fdinfo.c
-            echo "✓ LEVEL 4: SUSFS fix applied as fallback at end of show_fdinfo function"
+            echo "✓ LEVEL 2: SUSFS fix applied"
             FIXED=true
           fi
           
@@ -136,12 +106,9 @@ jobs:
           
           echo "=== VERIFICATION: SUSFS INTEGRATION CHECK ==="
           if grep -q "susfs.*wd:%x" fs/notify/fdinfo.c; then
-            echo "✓ SUCCESS: SUSFS code successfully integrated into fdinfo.c"
-            echo "=== RELEVANT LINES FROM fdinfo.c ==="
-            sed -n '/susfs wd:/,/}/p' fs/notify/fdinfo.c
+            echo "✓ SUCCESS: SUSFS code successfully integrated"
           else
-            echo "⚠️ WARNING: SUSFS code NOT found in fdinfo.c"
-            echo "⚠️  Continuing build - other SUSFS patches were applied successfully"
+            echo "⚠️ WARNING: SUSFS code NOT found in fdinfo.c - continuing anyway"
           fi
           
           echo "=== SUSFS INTEGRATION COMPLETE ==="
@@ -150,43 +117,49 @@ jobs:
       - name: Prepare config
         run: |
           echo "=== PREPARING KERNEL CONFIG ==="
-          echo "Architecture: $ARCH"
-          echo "Cross compile: $CROSS_COMPILE"
-          echo "PATH includes toolchain: $(echo $PATH | grep -o 'aarch64-linux-android-4.9' || echo 'NOT FOUND')"
           
-          # Проверяем toolchain
-          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1 || echo "❌ Toolchain still not found"
-          
-          # Создаём out директорию
-          mkdir -p out
-          
-          # Ищем правильный defconfig для Pixel 4XL
-          echo "=== SEARCHING FOR CORRECT DEFCONFIG ==="
+          # Ищем правильный defconfig
+          echo "=== SEARCHING FOR DEFCONFIG ==="
           if [ -f "arch/arm64/configs/coral_defconfig" ]; then
             echo "✓ Found coral_defconfig"
             DEFCONFIG=coral_defconfig
           elif [ -f "arch/arm64/configs/flame_defconfig" ]; then
-            echo "✓ Found flame_defconfig (Pixel 4) - using for Pixel 4XL"
+            echo "✓ Found flame_defconfig"
             DEFCONFIG=flame_defconfig
           else
             echo "❌ No coral/flame defconfig found, listing available:"
-            find arch/arm64/configs/ -name "*defconfig" | head -10
-            echo "Trying generic defconfig as fallback"
-            DEFCONFIG=defconfig
+            find arch/arm64/configs/ -name "*defconfig" | head -10 || echo "No defconfigs found"
+            # Пробуем найти любой подходящий
+            DEFCONFIG=$(find arch/arm64/configs/ -name "*defconfig" | head -1)
+            if [ -z "$DEFCONFIG" ]; then
+              echo "❌ No defconfig found at all - using generic"
+              DEFCONFIG=defconfig
+            fi
           fi
           
           echo "Using DEFCONFIG: $DEFCONFIG"
           
-          # Применяем defconfig с правильными переменными
-          make O=out $ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" $DEFCONFIG || {
-            echo "❌ Defconfig failed, trying alternative paths..."
-            # Альтернативные пути для defconfig
-            if make O=out $ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig; then
-              echo "✓ Fallback defconfig succeeded"
-            else
-              echo "❌ All defconfig attempts failed"
+          # Создаём out директорию
+          mkdir -p out
+          
+          # Устанавливаем PATH для toolchain
+          export PATH="$PWD/aarch64-linux-android-4.9/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-android-
+          export ARCH=arm64
+          
+          # Проверяем toolchain
+          echo "=== TOOLCHAIN CHECK ==="
+          which aarch64-linux-android-gcc && echo "✓ GCC found" || echo "❌ GCC not found"
+          aarch64-linux-android-gcc --version | head -1 || echo "❌ GCC version check failed"
+          
+          # Применяем defconfig
+          echo "=== APPLYING DEFCONFIG ==="
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- $DEFCONFIG || {
+            echo "❌ Defconfig failed, trying generic defconfig"
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig || {
+              echo "❌ Generic defconfig also failed"
               exit 1
-            fi
+            }
           }
           
           # Включаем KSU и SUSFS
@@ -194,6 +167,10 @@ jobs:
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' out/.config || true
+          
+          # Запускаем oldconfig для разрешения конфликтов
+          echo "=== RUNNING OLDCONFIG ==="
+          yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- oldconfig
           
           echo "=== KERNEL CONFIG VERIFICATION ==="
           grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES|CONFIG_KPROBE_EVENTS)" out/.config || echo "Some config options may be missing"
@@ -203,29 +180,40 @@ jobs:
       - name: Build kernel
         run: |
           echo "=== STARTING KERNEL BUILD ==="
-          echo "Using ARCH=$ARCH, CROSS_COMPILE=$CROSS_COMPILE"
-          echo "Toolchain path: $(which aarch64-linux-android-gcc)"
           
-          # Экспортируем переменные для make
-          export ARCH=$ARCH
-          export CROSS_COMPILE=$CROSS_COMPILE
+          # Устанавливаем PATH и переменные окружения
+          export PATH="$PWD/aarch64-linux-android-4.9/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-android-
+          export ARCH=arm64
           
-          # Проверяем, что Image.gz-dtb создастся в правильном месте
-          make O=out -j$(nproc --all) Image.gz-dtb || {
-            echo "=== BUILD FAILED ==="
-            echo "=== TRYING VERBOSE BUILD FOR DEBUG ==="
-            make O=out V=1 Image.gz-dtb 2>&1 | tail -30 || echo "Verbose build also failed"
+          echo "=== ENVIRONMENT CHECK ==="
+          echo "PATH: $PATH"
+          echo "CROSS_COMPILE: $CROSS_COMPILE"
+          echo "ARCH: $ARCH"
+          which aarch64-linux-android-gcc && echo "✓ GCC: $(which aarch64-linux-android-gcc)" || echo "❌ GCC not found"
+          
+          # Проверяем config
+          if [ ! -f "out/.config" ]; then
+            echo "❌ No config file found - cannot build"
+            exit 1
+          fi
+          echo "✓ Config file exists: $(wc -l < out/.config) lines"
+          
+          # Собираем ядро
+          echo "=== COMPILING KERNEL ==="
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- -j$(nproc --all) Image.gz-dtb || {
+            echo "=== BUILD FAILED - TRYING SINGLE THREAD FOR DEBUG ==="
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- V=1 Image.gz-dtb 2>&1 | head -50 || echo "Debug build also failed"
             exit 1
           }
           
           echo "=== KERNEL BUILD SUCCESSFUL ==="
-          ls -la out/arch/arm64/boot/ || echo "Output directory not found"
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "✓ Kernel Image created successfully"
-            echo "Kernel Image size: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
+            echo "✓ Kernel Image created: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
+            ls -la out/arch/arm64/boot/
           else
             echo "❌ Kernel Image not found - searching for alternatives:"
-            find out/ -name "Image*" -o -name "*.dtb" | head -5 || echo "No kernel images found"
+            find out/ -name "Image*" 2>/dev/null | head -5 || echo "No kernel images found"
             exit 1
           fi
 
@@ -241,7 +229,7 @@ jobs:
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
           cd AnyKernel3
           
-          # Настройка для Pixel 4XL (coral)
+          # Настройка для Pixel 4XL
           sed -i 's/#device.name1=/device.name1=coral/' anykernel.sh
           sed -i 's/#isize=/isize=3072/' anykernel.sh
           sed -i 's/#device.name2=/device.name2=coral/' anykernel.sh
@@ -251,7 +239,6 @@ jobs:
           sed -i 's/#do.cleanuponabort=0/do.cleanuponabort=0/' anykernel.sh
           sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0 + SUSFS for Pixel 4XL/' anykernel.sh
           
-          # Создаём финальный ZIP
           zip -r4 ../AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip * -x .git README.md
           cd ..
           
@@ -269,19 +256,20 @@ jobs:
         run: |
           echo "=== BUILD SUMMARY ==="
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "🎉 SUCCESS!"
             echo "✓ KernelSU-Next v1.1.0: Integrated"
-            echo "⚠️  SUSFS: Integrated with manual fixes (check logs for details)"
+            echo "⚠️  SUSFS: Integrated with manual fixes"
             echo "✓ Kernel built: $(ls -la out/arch/arm64/boot/Image.gz-dtb)"
-            echo "✓ Package created: $(ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip)"
+            echo "✓ Package ready: $(ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip)"
+            echo ""
+            echo "=== ⬇️  DOWNLOAD & FLASH INSTRUCTIONS === "
+            echo "1. Download ZIP from Artifacts section above"
+            echo "2. Extract: unzip -p *.zip boot.img > boot.img"
+            echo "3. Fastboot: adb reboot bootloader"
+            echo "4. Flash: fastboot flash boot boot.img"
+            echo "5. Reboot: fastboot reboot"
+            echo "6. Install KernelSU Manager app"
+            echo "7. Verify: Open app → should show v1.1.0"
           else
-            echo "❌ BUILD FAILED - no kernel image created"
+            echo "❌ BUILD FAILED - check logs above for errors"
           fi
-          echo ""
-          echo "=== INSTALLATION INSTRUCTIONS (IF SUCCESSFUL) ==="
-          echo "1. Download ZIP artifact from this workflow run"
-          echo "2. Boot Pixel 4XL to fastboot: adb reboot bootloader"
-          echo "3. Extract boot.img: unzip -p AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip boot.img > boot.img"
-          echo "4. Flash: fastboot flash boot boot.img"
-          echo "5. Reboot: fastboot reboot"
-          echo "6. Install KernelSU Manager app from GitHub releases"
-          echo "7. Verify KernelSU v1.1.0 in the app"
