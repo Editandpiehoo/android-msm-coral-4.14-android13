@@ -131,9 +131,11 @@ jobs:
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || true
           sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' out/.config || true
           
-          # Сокращаем LOCALVERSION, чтобы избежать ошибки с длиной UTS_RELEASE
-          echo "=== SHORTENING LOCALVERSION ==="
-          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-KSU"/' out/.config || echo 'CONFIG_LOCALVERSION="-KSU"' >> out/.config
+          # Отключаем CONFIG_LOCALVERSION_AUTO, чтобы убрать git hashes
+          sed -i 's/CONFIG_LOCALVERSION_AUTO=y/CONFIG_LOCALVERSION_AUTO=n/' out/.config || echo 'CONFIG_LOCALVERSION_AUTO=n' >> out/.config
+          
+          # Устанавливаем короткий LOCALVERSION
+          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' out/.config || echo 'CONFIG_LOCALVERSION=""' >> out/.config
           
           # Повторно разрешаем prompts после изменений
           yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- oldconfig
