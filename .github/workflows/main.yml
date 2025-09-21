@@ -27,21 +27,20 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-      - name: Integrate KernelSU-Next v1.1.0
+      - name: Remove old KernelSU and integrate KernelSU-Next v1.1.0
         run: |
+          rm -rf KernelSU  # Удаляем старую интеграцию KSU из репо
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v1.1.0/kernel/setup.sh" | bash -s v1.1.0
-          # Если нужно manual integration (если kprobe не сработает), добавь патчи вручную здесь
+          # Если нужно manual integration (если kprobe не сработает из-за ThinLTO), добавь патчи вручную здесь (см. docs KernelSU-Next для non-kprobe)
 
       - name: Integrate SUSFS patches
         run: |
           git clone https://gitlab.com/simonpunk/susfs4ksu.git
           cd susfs4ksu
-          git checkout kernel-4.14  # Ветка для 4.14
+          git checkout kernel-4.14
           cd ..
-          # Примени патчи (замени на реальные файлы из repo; проверь в susfs4ksu/tree/kernel-4.14)
-          git apply susfs4ksu/0001-susfs-base.patch  # Пример; добавь все .patch файлы
-          git apply susfs4ksu/0002-susfs-ksu-compat.patch  # Для совместимости с KSU
-          # Если revert нужен для KSU commit: git revert <commit-hash> (из SUSFS docs)
+          git apply susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch  # Основной патч; если есть дополнительные, добавь их аналогично
+          # Если revert нужен для KSU commit (из SUSFS docs или если патч не применяется), добавь: git revert <commit-hash>
 
       - name: Prepare config
         run: |
@@ -49,7 +48,7 @@ jobs:
           # Включи KSU и SUSFS в config (если не автоматически)
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config
-          # Добавь KPROBES если нужно
+          # Добавь KPROBES если нужно (или другие опции из docs)
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config
 
       - name: Build kernel
