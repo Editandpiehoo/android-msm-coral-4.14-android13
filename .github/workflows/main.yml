@@ -79,33 +79,4 @@ jobs:
           
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config
-          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config
-          sed -i 's/CONFIG_LOCALVERSION_AUTO=y/CONFIG_LOCALVERSION_AUTO=n/' out/.config
-          echo 'CONFIG_LOCALVERSION=""' >> out/.config
-          
-          yes "" | make O=out $ARCH=$ARCH $CROSS_COMPILE$CROSS_COMPILE oldconfig
-
-      - name: Build kernel
-        run: |
-          export PATH="$PWD/android-ndk-r23b/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          export CROSS_COMPILE=aarch64-linux-android-
-          export ARCH=arm64
-          
-          make O=out $ARCH=$ARCH $CROSS_COMPILE$CROSS_COMPILE -j$(nproc) Image.gz-dtb || exit 1
-          ls -la out/arch/arm64/boot/
-
-      - name: Package
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/device.name1=/device.name1=coral/' anykernel.sh
-          sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0 + SUSFS/' anykernel.sh
-          zip -r4 ../kernel.zip *
-          cd ..
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: Pixel4XL-Kernel
-          path: kernel.zip
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES
