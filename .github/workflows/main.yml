@@ -22,11 +22,12 @@ jobs:
       - name: Download Android toolchain
         run: |
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-          export PATH=$PATH:$(pwd)/aarch64-linux-android-4.9/bin
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          export ARCH=arm64
-          export SUBARCH=arm64
+          # Экспортируем переменные окружения для всех последующих шагов
+          echo "PATH=$PATH:$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
 
       - name: Clean and prepare kernel source
         run: |
@@ -55,10 +56,8 @@ jobs:
           sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > cleaned_susfs.patch
           
           echo "=== APPLYING SUSFS PATCH (ALLOWING ERRORS) ==="
-          # Применяем патч, игнорируя ошибки
           git apply --reject --ignore-whitespace cleaned_susfs.patch || echo "Patch completed with warnings - continuing with manual fix"
           
-          # Показываем reject файл если есть
           if [ -f "fs/notify/fdinfo.c.rej" ]; then
             echo "=== REJECT FILE FOUND ==="
             cat fs/notify/fdinfo.c.rej
@@ -68,10 +67,8 @@ jobs:
           echo "=== BEFORE FIX - searching for inotify section ==="
           grep -n -A5 -B3 "inotify.*mark.*mask" fs/notify/fdinfo.c || echo "No inotify section found with grep"
           
-          # МНОГОУРОВНЕВАЯ РУЧНАЯ ПРАВКА
           FIXED=false
           
-          # Уровень 1: Ищем точную строку с inotify_mark_user_mask
           if grep -q "inotify_mark_user_mask(mark));" fs/notify/fdinfo.c; then
             sed -i '/inotify_mark_user_mask(mark));/a\
             } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
@@ -84,7 +81,6 @@ jobs:
             FIXED=true
           fi
           
-          # Уровень 2: Ищем строку с inotify_mark_user_mask без точки с запятой
           if [ "$FIXED" = false ] && grep -q "inotify_mark_user_mask(mark)" fs/notify/fdinfo.c; then
             sed -i '/inotify_mark_user_mask(mark)/a\
             } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
@@ -97,7 +93,6 @@ jobs:
             FIXED=true
           fi
           
-          # Уровень 3: Ищем любую строку с "inotify wd:"
           if [ "$FIXED" = false ] && grep -q 'seq_printf.*"inotify wd:' fs/notify/fdinfo.c; then
             sed -i '/seq_printf.*"inotify wd:/,/inotify_mark_user_mask/a\
             } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
@@ -110,7 +105,6 @@ jobs:
             FIXED=true
           fi
           
-          # Уровень 4: Последний резерв - добавляем в конец функции
           if [ "$FIXED" = false ]; then
             sed -i '/static int show_fdinfo/{N;a\
             if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
@@ -124,10 +118,8 @@ jobs:
             FIXED=true
           fi
           
-          # Очистка
           rm -f fs/notify/fdinfo.c.rej cleaned_susfs.patch
           
-          # Финальная проверка
           echo "=== VERIFICATION: SUSFS INTEGRATION CHECK ==="
           if grep -q "susfs.*wd:%x" fs/notify/fdinfo.c; then
             echo "✓ SUCCESS: SUSFS code successfully integrated into fdinfo.c"
@@ -135,8 +127,6 @@ jobs:
             sed -n '/susfs wd:/,/}/p' fs/notify/fdinfo.c
           else
             echo "⚠️ WARNING: SUSFS code NOT found in fdinfo.c"
-            echo "=== SEARCHING FOR SUSFS MARKERS ==="
-            grep -n "FSNOTIFY_MARK_TYPE_SUSFS\|susfs_mark" fs/notify/fdinfo.c || echo "No SUSFS markers found"
             echo "⚠️  Continuing build - other SUSFS patches were applied successfully"
           fi
           
@@ -146,7 +136,14 @@ jobs:
       - name: Prepare config
         run: |
           echo "=== PREPARING KERNEL CONFIG ==="
-          make O=out coral_defconfig
+          echo "Architecture: $ARCH"
+          echo "Cross compile: $CROSS_COMPILE"
+          # Проверяем доступность toolchain
+          which ${CROSS_COMPILE}gcc || echo "Toolchain not found in PATH"
+          # Создаём out директорию если не существует
+          mkdir -p out
+          # Используем правильный defconfig для ARM64
+          make O=out ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} coral_defconfig
           # Включаем KSU и SUSFS
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || true
@@ -155,11 +152,22 @@ jobs:
           
           echo "=== KERNEL CONFIG VERIFICATION ==="
           grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES|CONFIG_KPROBE_EVENTS)" out/.config || echo "Some config options may be missing"
+          echo "=== ARCH CONFIG CHECK ==="
+          grep CONFIG_ARCH out/.config || echo "No ARCH config found"
 
       - name: Build kernel
         run: |
           echo "=== STARTING KERNEL BUILD ==="
-          make O=out -j$(nproc --all) Image.gz-dtb
+          echo "Using ARCH=$ARCH, CROSS_COMPILE=$CROSS_COMPILE"
+          # Сохраняем переменные окружения для make
+          export ARCH=$ARCH
+          export CROSS_COMPILE=$CROSS_COMPILE
+          make O=out -j$(nproc --all) Image.gz-dtb || {
+            echo "=== BUILD FAILED ==="
+            echo "=== LAST 20 LINES OF COMPILATION LOG ==="
+            make O=out V=1 2>&1 | tail -20 || echo "No build log available"
+            exit 1
+          }
           echo "=== KERNEL BUILD SUCCESSFUL ==="
           ls -la out/arch/arm64/boot/
           echo "Kernel Image size: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
