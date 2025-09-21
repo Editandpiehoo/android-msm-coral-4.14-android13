@@ -19,15 +19,25 @@ jobs:
           sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools xsltproc zip zlib1g-dev gcc-multilib g++-multilib libelf-dev python3 python3-pip
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Download Android toolchain
+      - name: Setup toolchain and environment
         run: |
+          # Скачиваем toolchain
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-          # Экспортируем переменные окружения для всех последующих шагов
-          echo "PATH=$PATH:$(pwd)/aarch64-linux-android-4.9/bin" >> $GITHUB_ENV
+          
+          # Добавляем toolchain в PATH
+          echo "$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
+          
+          # Устанавливаем переменные окружения для всех шагов
           echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
+          
+          # Проверяем toolchain
+          echo "=== TOOLCHAIN VERIFICATION ==="
+          ls -la aarch64-linux-android-4.9/bin/ | head -5
+          which aarch64-linux-android-gcc || echo "GCC not found"
+          aarch64-linux-android-gcc --version | head -1 || echo "GCC version check failed"
 
       - name: Clean and prepare kernel source
         run: |
@@ -37,6 +47,10 @@ jobs:
           git checkout -- fs/notify/fdinfo.c || true
           echo "=== Git status after cleanup ==="
           git status --short
+          
+          # Показываем доступные defconfig'и для Pixel 4XL
+          echo "=== AVAILABLE DEFCONFIGs ==="
+          find arch/arm64/configs/ -name "*coral*" -o -name "*flame*" | head -10 || echo "No coral/flame defconfigs found"
 
       - name: Integrate KernelSU-Next v1.1.0
         run: |
@@ -138,12 +152,43 @@ jobs:
           echo "=== PREPARING KERNEL CONFIG ==="
           echo "Architecture: $ARCH"
           echo "Cross compile: $CROSS_COMPILE"
-          # Проверяем доступность toolchain
-          which ${CROSS_COMPILE}gcc || echo "Toolchain not found in PATH"
-          # Создаём out директорию если не существует
+          echo "PATH includes toolchain: $(echo $PATH | grep -o 'aarch64-linux-android-4.9' || echo 'NOT FOUND')"
+          
+          # Проверяем toolchain
+          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1 || echo "❌ Toolchain still not found"
+          
+          # Создаём out директорию
           mkdir -p out
-          # Используем правильный defconfig для ARM64
-          make O=out ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} coral_defconfig
+          
+          # Ищем правильный defconfig для Pixel 4XL
+          echo "=== SEARCHING FOR CORRECT DEFCONFIG ==="
+          if [ -f "arch/arm64/configs/coral_defconfig" ]; then
+            echo "✓ Found coral_defconfig"
+            DEFCONFIG=coral_defconfig
+          elif [ -f "arch/arm64/configs/flame_defconfig" ]; then
+            echo "✓ Found flame_defconfig (Pixel 4) - using for Pixel 4XL"
+            DEFCONFIG=flame_defconfig
+          else
+            echo "❌ No coral/flame defconfig found, listing available:"
+            find arch/arm64/configs/ -name "*defconfig" | head -10
+            echo "Trying generic defconfig as fallback"
+            DEFCONFIG=defconfig
+          fi
+          
+          echo "Using DEFCONFIG: $DEFCONFIG"
+          
+          # Применяем defconfig с правильными переменными
+          make O=out $ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" $DEFCONFIG || {
+            echo "❌ Defconfig failed, trying alternative paths..."
+            # Альтернативные пути для defconfig
+            if make O=out $ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig; then
+              echo "✓ Fallback defconfig succeeded"
+            else
+              echo "❌ All defconfig attempts failed"
+              exit 1
+            fi
+          }
+          
           # Включаем KSU и SUSFS
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
           sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || true
@@ -159,25 +204,43 @@ jobs:
         run: |
           echo "=== STARTING KERNEL BUILD ==="
           echo "Using ARCH=$ARCH, CROSS_COMPILE=$CROSS_COMPILE"
-          # Сохраняем переменные окружения для make
+          echo "Toolchain path: $(which aarch64-linux-android-gcc)"
+          
+          # Экспортируем переменные для make
           export ARCH=$ARCH
           export CROSS_COMPILE=$CROSS_COMPILE
+          
+          # Проверяем, что Image.gz-dtb создастся в правильном месте
           make O=out -j$(nproc --all) Image.gz-dtb || {
             echo "=== BUILD FAILED ==="
-            echo "=== LAST 20 LINES OF COMPILATION LOG ==="
-            make O=out V=1 2>&1 | tail -20 || echo "No build log available"
+            echo "=== TRYING VERBOSE BUILD FOR DEBUG ==="
+            make O=out V=1 Image.gz-dtb 2>&1 | tail -30 || echo "Verbose build also failed"
             exit 1
           }
+          
           echo "=== KERNEL BUILD SUCCESSFUL ==="
-          ls -la out/arch/arm64/boot/
-          echo "Kernel Image size: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
+          ls -la out/arch/arm64/boot/ || echo "Output directory not found"
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "✓ Kernel Image created successfully"
+            echo "Kernel Image size: $(du -h out/arch/arm64/boot/Image.gz-dtb)"
+          else
+            echo "❌ Kernel Image not found - searching for alternatives:"
+            find out/ -name "Image*" -o -name "*.dtb" | head -5 || echo "No kernel images found"
+            exit 1
+          fi
 
       - name: Package with AnyKernel3
         run: |
           echo "=== PACKAGING WITH ANYKERNEL3 ==="
+          if [ ! -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "❌ Kernel image not found - cannot package"
+            exit 1
+          fi
+          
           git clone https://github.com/osm0sis/AnyKernel3
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
           cd AnyKernel3
+          
           # Настройка для Pixel 4XL (coral)
           sed -i 's/#device.name1=/device.name1=coral/' anykernel.sh
           sed -i 's/#isize=/isize=3072/' anykernel.sh
@@ -187,9 +250,11 @@ jobs:
           sed -i 's/#do.cleanup=1/do.cleanup=1/' anykernel.sh
           sed -i 's/#do.cleanuponabort=0/do.cleanuponabort=0/' anykernel.sh
           sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0 + SUSFS for Pixel 4XL/' anykernel.sh
+          
           # Создаём финальный ZIP
           zip -r4 ../AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip * -x .git README.md
           cd ..
+          
           echo "=== PACKAGING COMPLETE ==="
           ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip
 
@@ -203,12 +268,16 @@ jobs:
       - name: Final verification
         run: |
           echo "=== BUILD SUMMARY ==="
-          echo "✓ KernelSU-Next v1.1.0: Integrated"
-          echo "⚠️  SUSFS: Integrated with manual fixes (check logs for details)"
-          echo "✓ Kernel built: $(ls -la out/arch/arm64/boot/Image.gz-dtb)"
-          echo "✓ Package created: $(ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip)"
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "✓ KernelSU-Next v1.1.0: Integrated"
+            echo "⚠️  SUSFS: Integrated with manual fixes (check logs for details)"
+            echo "✓ Kernel built: $(ls -la out/arch/arm64/boot/Image.gz-dtb)"
+            echo "✓ Package created: $(ls -la AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip)"
+          else
+            echo "❌ BUILD FAILED - no kernel image created"
+          fi
           echo ""
-          echo "=== INSTALLATION INSTRUCTIONS ==="
+          echo "=== INSTALLATION INSTRUCTIONS (IF SUCCESSFUL) ==="
           echo "1. Download ZIP artifact from this workflow run"
           echo "2. Boot Pixel 4XL to fastboot: adb reboot bootloader"
           echo "3. Extract boot.img: unzip -p AnyKernel3-KernelSU-Next-v1.1.0-SUSFS-Pixel4XL.zip boot.img > boot.img"
@@ -216,7 +285,3 @@ jobs:
           echo "5. Reboot: fastboot reboot"
           echo "6. Install KernelSU Manager app from GitHub releases"
           echo "7. Verify KernelSU v1.1.0 in the app"
-          echo ""
-          echo "=== TROUBLESHOOTING ==="
-          echo "If KernelSU doesn't show v1.1.0, reflash stock boot.img and try again"
-          echo "SUSFS modules should work with KernelSU Manager modules section"
