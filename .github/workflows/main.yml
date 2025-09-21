@@ -27,15 +27,6 @@ jobs:
           echo "$TOOLCHAIN_DIR" >> $GITHUB_PATH
           $TOOLCHAIN_DIR/aarch64-linux-android-gcc --version
 
-      - name: Fix Python compatibility
-        run: |
-          if [ -f "scripts/gcc-wrapper.py" ]; then
-            cp scripts/gcc-wrapper.py scripts/gcc-wrapper.py.bak
-            sed -i 's/print >> sys.stderr/print(file=sys.stderr)/g' scripts/gcc-wrapper.py
-            sed -i 's/print line,/print(line, end="")/g' scripts/gcc-wrapper.py
-            echo "Fixed gcc-wrapper.py"
-          fi
-
       - name: Clean source
         run: |
           rm -rf KernelSU .gitmodules
@@ -47,26 +38,6 @@ jobs:
           git add .
           git commit -m "KernelSU v1.1.0" || true
 
-      - name: Apply SUSFS
-        run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          cd susfs4ksu && git checkout kernel-4.14 && cd ..
-          sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > patch
-          git apply --reject patch || true
-          rm patch
-          if [ -f "fs/notify/fdinfo.c.rej" ]; then
-            sed -i '/inotify_mark_user_mask/a\
-  } else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {\
-    struct susfs_mark *sus_mark = container_of(mark, struct susfs_mark, fsn_mark);\
-    seq_printf(m, "susfs wd:%x ino:%lx sdev:%x mask:%x ",\
-               sus_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,\
-               sus_mark->mask);\
-  }' fs/notify/fdinfo.c
-            rm fs/notify/fdinfo.c.rej
-          fi
-          git add .
-          git commit -m "SUSFS integration" || true
-
       - name: Configure kernel
         run: |
           mkdir -p out
@@ -74,9 +45,30 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export ARCH=arm64
           
-          make O=out $ARCH=$ARCH $CROSS_COMPILE$CROSS_COMPILE sm8150_defconfig || make O=out $ARCH=$ARCH $CROSS_COMPILE$CROSS_COMPILE defconfig
-          yes "" | make O=out $ARCH=$ARCH $CROSS_COMPILE$CROSS_COMPILE oldconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
+          yes "" | make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- oldconfig
+
+      - name: Build kernel
+        run: |
+          export PATH="$PWD/android-ndk-r23b/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-android-
+          export ARCH=arm64
           
-          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
-          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config
-          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- -j$(nproc) Image.gz-dtb || exit 1
+          ls -la out/arch/arm64/boot/
+
+      - name: Package
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/device.name1=/device.name1=coral/' anykernel.sh
+          sed -i 's/kernel.string=/kernel.string=KernelSU-Next v1.1.0/' anykernel.sh
+          zip -r4 ../kernel.zip *
+          cd ..
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pixel4XL-Kernel
+          path: kernel.zip
