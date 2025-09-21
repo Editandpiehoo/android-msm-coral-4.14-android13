@@ -29,9 +29,15 @@ jobs:
 
       - name: Remove old KernelSU and integrate KernelSU-Next v1.1.0
         run: |
-          rm -rf KernelSU  # Удаляем старую интеграцию KSU из репо
+          # Удаляем старую интеграцию KSU из репо
+          rm -rf KernelSU
+          # Удаляем возможные изменения в файлах, которые могут конфликтовать с SUSFS
+          git checkout -- fs/notify/fdinfo.c  # Возвращаем файл к оригинальному состоянию
+          # Проверяем, что файл существует
+          ls -la fs/notify/fdinfo.c || echo "Warning: fs/notify/fdinfo.c not found"
+          
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v1.1.0/kernel/setup.sh" | bash -s v1.1.0
-          # Если нужно manual integration (если kprobe не сработает из-за ThinLTO), добавь патчи вручную здесь (см. docs KernelSU-Next для non-kprobe)
+          # Если нужно manual integration (если kprobe не сработает из-за ThinLTO), добавь патчи вручную здесь
 
       - name: Integrate SUSFS patches
         run: |
@@ -39,17 +45,47 @@ jobs:
           cd susfs4ksu
           git checkout kernel-4.14
           cd ..
-          git apply susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch  # Основной патч; если есть дополнительные, добавь их аналогично
-          # Если revert нужен для KSU commit (из SUSFS docs или если патч не применяется), добавь: git revert <commit-hash>
+          
+          # Показываем состояние файлов перед применением патча
+          echo "=== Before patch ==="
+          git status
+          ls -la fs/notify/
+          
+          # Очищаем trailing whitespace из патча и применяем с флагом игнорирования пробелов
+          sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > susfs4ksu/kernel_patches/cleaned_susfs.patch
+          
+          if git apply --ignore-whitespace --verbose susfs4ksu/kernel_patches/cleaned_susfs.patch; then
+            echo "SUSFS patch applied successfully"
+          else
+            echo "Patch failed, trying 3-way merge..."
+            if git apply --3way --ignore-whitespace susfs4ksu/kernel_patches/cleaned_susfs.patch; then
+              echo "SUSFS patch applied with 3-way merge"
+            else
+              echo "Patch still failed. Showing diff for manual review:"
+              git apply --reject --ignore-whitespace susfs4ksu/kernel_patches/cleaned_susfs.patch
+              # Сохраняем reject файлы для анализа
+              find . -name "*.rej" -exec cat {} \; || true
+              exit 1
+            fi
+          fi
+          
+          # Проверяем статус после применения
+          echo "=== After patch ==="
+          git status
+          git diff --name-only | head -10
 
       - name: Prepare config
         run: |
           make O=out coral_defconfig
           # Включи KSU и SUSFS в config (если не автоматически)
-          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
-          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || echo "KSU config already set"
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || echo "SUSFS config already set"
           # Добавь KPROBES если нужно (или другие опции из docs)
-          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || echo "KPROBES config already set"
+          
+          # Показываем релевантные части config
+          echo "=== Kernel config ==="
+          grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES)" out/.config || true
 
       - name: Build kernel
         run: |
