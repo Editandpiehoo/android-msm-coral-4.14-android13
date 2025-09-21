@@ -11,6 +11,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Полный гит-история для патчей
+          submodules: false  # Отключаем автоматическое обновление submodules
 
       - name: Install dependencies
         run: |
@@ -27,11 +28,24 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-      - name: Remove old KernelSU and integrate KernelSU-Next v1.1.0
+      - name: Clean and prepare kernel source
         run: |
+          # Удаляем старую интеграцию KSU
           rm -rf KernelSU
-          git checkout -- fs/notify/fdinfo.c
+          # Удаляем submodule ссылки из .gitmodules и .git/config
+          rm -f .gitmodules
+          git config --unset-all submodule.KernelSU.url || true
+          # Возвращаем проблемный файл к оригинальному состоянию
+          git checkout -- fs/notify/fdinfo.c || true
+          # Показываем статус
+          echo "=== Git status after cleanup ==="
+          git status --short
+
+      - name: Integrate KernelSU-Next v1.1.0
+        run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v1.1.0/kernel/setup.sh" | bash -s v1.1.0
+          echo "=== Git status after KSU integration ==="
+          git status --short
 
       - name: Integrate SUSFS patches with manual fix
         run: |
@@ -40,36 +54,73 @@ jobs:
           git checkout kernel-4.14
           cd ..
           
-          sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > susfs4ksu/kernel_patches/cleaned_susfs.patch
+          # Очищаем trailing whitespace из патча
+          sed 's/[[:space:]]*$//' susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch > cleaned_susfs.patch
           
-          git apply --reject --ignore-whitespace susfs4ksu/kernel_patches/cleaned_susfs.patch
+          # Применяем патч с reject файлами
+          git apply --reject --ignore-whitespace cleaned_susfs.patch
           
+          # Проверяем и показываем reject файл
           if [ -f "fs/notify/fdinfo.c.rej" ]; then
-            echo "=== Reject file content ==="
+            echo "=== REJECT FILE CONTENT ==="
             cat fs/notify/fdinfo.c.rej
-            echo "=== Current fdinfo.c around problematic area ==="
+            
+            echo "=== CURRENT fdinfo.c AROUND LINE 83 ==="
             sed -n '70,100p' fs/notify/fdinfo.c
             
+            # ПОЛНАЯ РУЧНАЯ ПРАВКА - добавляем SUSFS блок после inotify
+            # Ищем строку с inotify_mark_user_mask и добавляем SUSFS код
             if grep -q "inotify_mark_user_mask(mark)" fs/notify/fdinfo.c; then
-              awk '/inotify_mark_user_mask\(mark\)/ {print $0; print "			if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {"; print "				seq_printf(m, \"susfs \");"; print "			}"; next} {print}' fs/notify/fdinfo.c > fs/notify/fdinfo.c.tmp && mv fs/notify/fdinfo.c.tmp fs/notify/fdinfo.c
-              echo "Manual SUSFS fix applied to fdinfo.c"
+              # Создаём временный файл с исправлением
+              awk '
+              /seq_printf\(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:0 ",/ {
+                print $0
+                print "			   inotify_mark_user_mask(mark));"
+                print "			} else if (mark->type == FSNOTIFY_MARK_TYPE_SUSFS) {"
+                print "				struct susfs_mark *susfs_mark;"
+                print "				susfs_mark = container_of(mark, struct susfs_mark, fsn_mark);"
+                print "				seq_printf(m, \"susfs wd:%x ino:%lx sdev:%x mask:%x\","
+                print "					   susfs_mark->wd, mark->inode->i_ino, mark->inode->i_sb->s_dev,"
+                print "					   susfs_mark->mask);"
+                next
+              }
+              /inotify_mark_user_mask\(mark\);/ { next }  # Пропускаем оригинальную строку
+              { print }
+              ' fs/notify/fdinfo.c > fs/notify/fdinfo_fixed.c
+              
+              # Проверяем, что исправление получилось
+              if grep -q "susfs wd:%x" fs/notify/fdinfo_fixed.c; then
+                mv fs/notify/fdinfo_fixed.c fs/notify/fdinfo.c
+                echo "✓ Manual SUSFS fix applied successfully"
+              else
+                echo "✗ Manual fix failed, showing current file:"
+                cat fs/notify/fdinfo_fixed.c
+                exit 1
+              fi
+            else
+              echo "✗ Could not find inotify reference for SUSFS integration"
+              exit 1
             fi
             
-            rm -f fs/notify/fdinfo.c.rej
+            rm -f fs/notify/fdinfo.c.rej cleaned_susfs.patch
+          else
+            echo "✓ No reject files - all patches applied cleanly"
           fi
           
-          echo "=== Final fdinfo.c check ==="
-          grep -A3 -B3 "susfs\|inotify.*mark" fs/notify/fdinfo.c || echo "SUSFS markers may not be added correctly"
+          # Финальная проверка
+          echo "=== FINAL fdinfo.c SUSFS CHECK ==="
+          grep -A5 -B5 "susfs.*wd:%x" fs/notify/fdinfo.c || echo "WARNING: SUSFS code not found in fdinfo.c"
 
       - name: Prepare config
         run: |
           make O=out coral_defconfig
-          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || echo "KSU config already set"
-          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || echo "SUSFS config already set"
-          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || echo "KPROBES config already set"
+          # Включаем KSU и SUSFS
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' out/.config || true
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config || true
           
-          echo "=== Kernel config ==="
-          grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES)" out/.config || true
+          echo "=== KERNEL CONFIG ==="
+          grep -E "(CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES)" out/.config || echo "Config options not found"
 
       - name: Build kernel
         run: |
